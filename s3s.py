@@ -4,19 +4,20 @@
 # https://github.com/frozenpandaman/s3s
 # License: GPLv3
 
-import argparse, datetime, json, os, re, requests, sys, time, uuid
+import argparse, datetime, json, os, shutil, re, requests, sys, time, uuid
 import msgpack
 from packaging import version
 from PIL import Image
 from io import BytesIO
 import iksm, utils#, utils_ss
 
-A_VERSION = "0.1.4"
+A_VERSION = "0.1.5"
 
 DEBUG = False
 
 os.system("") # ANSI escape setup
-sys.stdout.reconfigure(encoding='utf-8') # note: please stop using git bash
+if sys.version_info[1] >= 7: # only works on python 3.7+
+	sys.stdout.reconfigure(encoding='utf-8') # note: please stop using git bash
 
 # CONFIG.TXT CREATION
 if getattr(sys, 'frozen', False): # place config.txt in same directory as script (bundled or not)
@@ -169,8 +170,10 @@ def gen_new_tokens(reason, force=False):
 		print(f"Wrote tokens for {acc_name} to config.txt.\n")
 
 
-def fetch_json(which, separate=False, exportall=False, specific=False, numbers_only=False, printout=False):
+def fetch_json(which, separate=False, exportall=False, specific=False, numbers_only=False, printout=False, skipprefetch=False):
 	'''Returns results JSON from SplatNet 3, including a combined dict for ink battles + SR jobs if requested.'''
+
+	swim = SquidProgress()
 
 	if DEBUG:
 		print(f"* fetch_json() called with which={which}, separate={separate}, " \
@@ -180,9 +183,11 @@ def fetch_json(which, separate=False, exportall=False, specific=False, numbers_o
 		print("fetch_json() must be called with separate=True if using exportall.")
 		sys.exit(1)
 
-	prefetch_checks(printout)
-	if DEBUG:
-		print("* prefetch_checks() succeeded")
+	if not skipprefetch:
+		prefetch_checks(printout)
+		if DEBUG:
+			print("* prefetch_checks() succeeded")
+	swim()
 
 	ink_list, salmon_list = [], []
 	parent_files = []
@@ -207,6 +212,7 @@ def fetch_json(which, separate=False, exportall=False, specific=False, numbers_o
 		queries.append(None)
 
 	needs_sorted = False # https://ygdp.yale.edu/phenomena/needs-washed :D
+
 	for sha in queries:
 		if sha != None:
 			if DEBUG:
@@ -216,6 +222,7 @@ def fetch_json(which, separate=False, exportall=False, specific=False, numbers_o
 
 			query1 = requests.post(utils.GRAPHQL_URL, data=utils.gen_graphql_body(sha), headers=headbutt(), cookies=dict(_gtoken=GTOKEN))
 			query1_resp = json.loads(query1.text)
+			swim()
 
 			# ink battles - latest 50 of any type
 			if "latestBattleHistories" in query1_resp["data"]:
@@ -259,6 +266,7 @@ def fetch_json(which, separate=False, exportall=False, specific=False, numbers_o
 						cookies=dict(_gtoken=GTOKEN))
 					query2_resp_b = json.loads(query2_b.text)
 					ink_list.append(query2_resp_b)
+					swim()
 
 				for jid in job_ids:
 					query2_j = requests.post(utils.GRAPHQL_URL,
@@ -267,6 +275,7 @@ def fetch_json(which, separate=False, exportall=False, specific=False, numbers_o
 						cookies=dict(_gtoken=GTOKEN))
 					query2_resp_j = json.loads(query2_j.text)
 					salmon_list.append(query2_resp_j)
+					swim()
 
 				if needs_sorted: # put regular, bankara, and private in order, since they were exported in sequential chunks
 					try:
@@ -478,11 +487,13 @@ def prepare_battle_result(battle, ismonitoring, overview_data=None):
 
 	## RESULT ##
 	############
-	result = battle["judgement"][-4:]
+	result = battle["judgement"]
 	if result == "WIN":
 		payload["result"] = "win"
-	elif result == "LOSE": # gets EXEMPTED_LOSE and DEEMED_LOSE too
+	elif result == "LOSE" or result == "DEEMED_LOSE":
 		payload["result"] = "lose"
+	elif result == "EXEMPTED_LOSE":
+		payload["result"] = "exempted_lose" # doesn't count toward stats
 	elif result == "DRAW":
 		payload["result"] = "draw"
 
@@ -992,6 +1003,25 @@ def monitor_battles(which, secs, isblackout, istestrun):
 		print("Please run s3s again with " + '\033[91m' + "-r" + '\033[0m' + " to get these battles.")
 		print("Bye!")
 
+class SquidProgress:
+	'''Display animation while waiting.'''
+
+	def __init__(self):
+		self.count = 0
+
+	def __call__(self):
+		lineend = shutil.get_terminal_size()[0] - 5 # 5 = ('>=> ' or '===>') + blank 1
+		ika = '>=> ' if self.count % 2 == 0 else '===>'
+		sys.stdout.write(f"\r{' '*self.count}{ika}{' '*(lineend - self.count)}")
+		sys.stdout.flush()
+		self.count += 1
+		if self.count > lineend:
+			self.count = 0
+
+	def __del__(self):
+		sys.stdout.write(f"\r{' '*(os.get_terminal_size()[0] - 1)}\r")
+		sys.stdout.flush()
+
 
 def main():
 	'''Main process, including I/O and setup.'''
@@ -1068,7 +1098,7 @@ def main():
 		prefetch_checks(printout=True)
 		print("Fetching your JSON files to export locally. This might take a while...")
 		# fetch_json() calls prefetch_checks() to gen or check tokens
-		parents, results, coop_results = fetch_json("both", separate=True, exportall=True, specific=True)
+		parents, results, coop_results = fetch_json("both", separate=True, exportall=True, specific=True, skipprefetch=True)
 
 		cwd = os.getcwd()
 		export_dir = os.path.join(cwd, f'export-{int(time.time())}')
